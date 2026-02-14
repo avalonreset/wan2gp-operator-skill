@@ -47,6 +47,7 @@ This is not "more UI." It is better control.
 - Failure diagnosis with next-step commands
 - Upstream release tracking
 - Recursive evolution state (`.wan2gp_operator_state.json`)
+- Music-video pipeline (audio analyze -> beat plan -> clip generation -> ffmpeg assembly)
 
 ## Workflow
 
@@ -57,6 +58,42 @@ python scripts/wan2gp_operator.py run --wan-root <WAN2GP_ROOT> --process <settin
 python scripts/wan2gp_operator.py run --wan-root <WAN2GP_ROOT> --process <settings.json> --log-file logs/run.log
 python scripts/wan2gp_operator.py evolve --wan-root <WAN2GP_ROOT> --log-file logs/run.log
 ```
+
+## Music Video Pipeline (Phase 1)
+
+Turn one track into a structured multi-shot video using Wan2GP as the generation engine.
+
+### End-to-end
+
+```bash
+python scripts/wan2gp_operator.py music-video \
+  --audio "<SONG>.mp3" \
+  --theme "neon summer city, confident performance energy" \
+  --wan-root <WAN2GP_ROOT> \
+  --execute-generation \
+  --evolve-on-failure
+```
+
+### Stage-by-stage
+
+```bash
+python scripts/wan2gp_operator.py music-analyze --audio "<SONG>.mp3"
+python scripts/wan2gp_operator.py music-plan --analysis <audio_analysis.json> --theme "<THEME>"
+python scripts/wan2gp_operator.py music-generate --plan <music_plan.json> --wan-root <WAN2GP_ROOT> --execute-generation
+python scripts/wan2gp_operator.py music-assemble --audio "<SONG>.mp3" --manifest <generation_manifest.json>
+```
+
+### Generated artifacts
+
+- `audio_analysis.json`: duration, BPM, beat grid, sections
+- `music_video_plan.json`: beat-aligned shot timeline and prompts
+- `generation_manifest.json`: take-by-take compose/run/evolve results
+- `music_video_master.mp4`: assembled output with track muxed in
+
+### Dependencies
+
+- Required: `ffmpeg`, `ffprobe`
+- Optional but recommended: `librosa` (better beat detection)
 
 ## Skill Layout
 
@@ -82,4 +119,3 @@ Then restart Codex and invoke the skill by name.
 Wan2GP Operator is for builders who care about outcomes, not ritual.
 You can keep clicking around and hoping for magic.
 Or you can run a repeatable video ops pipeline that gets better every time.
-

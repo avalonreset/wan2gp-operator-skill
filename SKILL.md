@@ -4,10 +4,12 @@ description: >
   Codex-first operations suite for Wan2GP. Assesses installation readiness,
   plans or executes setup, composes Wan2GP settings JSON from natural-language
   prompts with VRAM-aware defaults, runs `wgp.py --process` headless jobs,
-  diagnoses failures, and checks/summarizes upstream releases. Use when user
+  diagnoses failures, checks/summarizes upstream releases, and orchestrates
+  music-video pipelines from an audio track. Use when user
   says "set up wan2gp", "is my machine good for wan2gp", "run this wan2gp
   queue", "generate wan2gp settings from this prompt", "wan2gp failed",
-  "check wan2gp updates", or "what changed in the new wan2gp release".
+  "check wan2gp updates", "what changed in the new wan2gp release", "make a
+  music video from this song", or "beat-sync wan2gp clips".
 ---
 
 # Wan2GP Operator
@@ -114,6 +116,26 @@ python scripts/wan2gp_operator.py evolve --wan-root <WAN2GP_ROOT> --log-file <LO
 in `<WAN2GP_ROOT>/.wan2gp_operator_state.json`.
 It also learns unsupported attention backends from logs and auto-falls back to `sdpa`.
 
+### Step 9: Build A Music Video Pipeline
+
+Single command:
+```bash
+python scripts/wan2gp_operator.py music-video \
+  --audio <SONG_FILE> \
+  --theme "<CREATIVE_DIRECTION>" \
+  --wan-root <WAN2GP_ROOT> \
+  --execute-generation \
+  --evolve-on-failure
+```
+
+Stage commands:
+```bash
+python scripts/wan2gp_operator.py music-analyze --audio <SONG_FILE>
+python scripts/wan2gp_operator.py music-plan --analysis <AUDIO_ANALYSIS_JSON> --theme "<CREATIVE_DIRECTION>"
+python scripts/wan2gp_operator.py music-generate --plan <PLAN_JSON> --wan-root <WAN2GP_ROOT> --execute-generation
+python scripts/wan2gp_operator.py music-assemble --audio <SONG_FILE> --manifest <GENERATION_MANIFEST_JSON>
+```
+
 ## Quality Gates
 
 Before marking a run as complete:
@@ -125,6 +147,7 @@ Before marking a run as complete:
 - [ ] Failure diagnosis produced when exit status was non-zero
 - [ ] Update check performed when user asks about latest release changes
 - [ ] Capability state reviewed/updated after repeat failures
+- [ ] For music-video runs: analysis, plan, generation manifest, and assembly outputs captured
 
 ## Output Contract
 
@@ -180,4 +203,11 @@ Actions:
 1. `wan2gp_operator.py run ... --log-file ...`
 2. `wan2gp_operator.py evolve --wan-root ... --log-file ...`
 3. Rerun with evolved recommendations (or rely on auto-adjust retry behavior)
+
+### Example: Music Video From A Song
+User says: "Take this track and make a cohesive music video."
+Actions:
+1. `wan2gp_operator.py music-video --audio ... --theme ... --wan-root ... --execute-generation`
+2. If quality is weak, rerun with `--evolve-on-failure` and adjusted theme
+3. Return output video path plus plan/manifest files
 

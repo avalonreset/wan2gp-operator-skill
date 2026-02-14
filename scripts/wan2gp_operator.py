@@ -31,6 +31,11 @@ SCRIPT_MAP = {
     "diagnose": "diagnose_failure.py",
     "updates": "check_updates.py",
     "evolve": "evolve_operator.py",
+    "music-analyze": "music_analyze.py",
+    "music-plan": "music_plan.py",
+    "music-generate": "music_generate.py",
+    "music-assemble": "music_assemble_ffmpeg.py",
+    "music-video": "music_video.py",
 }
 
 
