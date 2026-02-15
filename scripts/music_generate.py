@@ -27,8 +27,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quality-default",
         choices=["draft", "balanced", "quality"],
-        default="balanced",
+        default="quality",
         help="Fallback compose quality when shot does not specify quality_hint",
+    )
+    parser.add_argument(
+        "--respect-shot-quality-hints",
+        action="store_true",
+        help="Respect per-shot quality_hint from plan. By default quality-default is enforced globally.",
+    )
+    parser.add_argument(
+        "--model-policy",
+        choices=["auto", "max-vram", "strict-t2v-2-2"],
+        default="max-vram",
+        help="Model enforcement policy. max-vram forces t2v_2_2 on high-VRAM systems.",
     )
     parser.add_argument("--max-shots", type=int, help="Optional max number of shots to process")
     parser.add_argument("--max-takes-per-shot", type=int, help="Optional cap on takes per shot")
@@ -86,6 +97,31 @@ def _quality_from_shot(shot: dict[str, Any], fallback: str) -> str:
     if quality not in {"draft", "balanced", "quality"}:
         return fallback
     return quality
+
+
+def _detect_max_vram_gb() -> float:
+    """Detect max VRAM from nvidia-smi; fallback to 0 when unavailable."""
+    if shutil.which("nvidia-smi") is None:
+        return 0.0
+    command = [
+        "nvidia-smi",
+        "--query-gpu=memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    result = _run_no_throw(command)
+    if result.returncode != 0:
+        return 0.0
+    values: list[float] = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            mib = float(line)
+        except Exception:
+            continue
+        values.append(round(mib / 1024.0, 2))
+    return max(values) if values else 0.0
 
 
 def _short_tail(text: str, max_chars: int = 1200) -> str:
@@ -208,6 +244,96 @@ def _generate_previews(
     }
 
 
+def _load_settings_file(path: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        pass
+    return {}
+
+
+def _save_settings_file(path: Path, settings: dict[str, Any]) -> None:
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def _should_force_t2v22(model_policy: str, detected_vram_gb: float) -> bool:
+    if model_policy == "strict-t2v-2-2":
+        return True
+    if model_policy == "max-vram":
+        return detected_vram_gb >= 20.0
+    return False
+
+
+def _enforce_t2v22_settings(
+    process_file: Path,
+    *,
+    model_policy: str,
+    detected_vram_gb: float,
+    quality: str,
+) -> dict[str, Any]:
+    """Enforce high-end t2v_2_2 recipe when policy requires it."""
+    report: dict[str, Any] = {"applied": False, "notes": []}
+    if not _should_force_t2v22(model_policy, detected_vram_gb):
+        report["notes"].append("Model policy did not require t2v_2_2 enforcement.")
+        return report
+
+    settings = _load_settings_file(process_file)
+    if not settings:
+        report["notes"].append("Could not load process settings for model enforcement.")
+        return report
+
+    model_type = str(settings.get("model_type", "")).strip()
+    if model_type.startswith("i2v") or model_type.startswith("vace"):
+        report["notes"].append("Skipped enforcement for non-text2video settings.")
+        return report
+
+    notes: list[str] = []
+    if settings.get("model_type") != "t2v_2_2":
+        settings["model_type"] = "t2v_2_2"
+        notes.append("Forced model_type to t2v_2_2.")
+
+    original_steps = int(settings.get("num_inference_steps", 24) or 24)
+    if quality == "quality":
+        target_steps = max(28, original_steps)
+    else:
+        target_steps = max(24, original_steps)
+    if settings.get("num_inference_steps") != target_steps:
+        settings["num_inference_steps"] = target_steps
+        notes.append(f"Raised num_inference_steps to {target_steps}.")
+
+    video_length = int(settings.get("video_length", 49) or 49)
+    clamped_length = min(max(video_length, 33), 49)
+    if settings.get("video_length") != clamped_length:
+        settings["video_length"] = clamped_length
+        notes.append(f"Clamped video_length to {clamped_length} for coherence.")
+
+    settings["guidance_phases"] = 2
+    settings["guidance_scale"] = 4.5
+    settings["guidance2_scale"] = 3.0
+    settings["switch_threshold"] = 875
+    settings["flow_shift"] = 5
+    notes.append("Applied Wan2.2 quality core params (cfg, switch_threshold, flow_shift).")
+
+    negative_prompt = str(settings.get("negative_prompt", "")).strip()
+    additions = "gray blob, abstract texture mush, jitter, flicker, low quality, deformed anatomy"
+    merged = [part.strip() for part in f"{negative_prompt}, {additions}".split(",") if part.strip()]
+    deduped = list(dict.fromkeys(merged))
+    settings["negative_prompt"] = ", ".join(deduped)
+    notes.append("Strengthened negative prompt for coherence artifacts.")
+
+    _save_settings_file(process_file, settings)
+    report["applied"] = True
+    report["notes"] = notes
+    report["settings"] = settings
+    return report
+
+
+def _enforced_runtime_flags() -> dict[str, Any]:
+    return {"attention": "sdpa", "profile": "3", "teacache": None, "compile": False}
+
+
 def _compose_command(
     args: argparse.Namespace,
     shot: dict[str, Any],
@@ -216,6 +342,8 @@ def _compose_command(
 ) -> list[str]:
     duration_seconds = float(shot.get("duration_sec", 3.0) or 3.0)
     quality = _quality_from_shot(shot, args.quality_default)
+    if not args.respect_shot_quality_hints:
+        quality = args.quality_default
     command = [
         args.python_exe,
         str(Path(__file__).resolve().parent / "compose_settings.py"),
@@ -363,6 +491,7 @@ def main() -> int:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
         plan_resolution = str(plan.get("resolution", "832x480")).strip()
+        detected_vram_gb = _detect_max_vram_gb()
         shot_reports: list[dict[str, Any]] = []
         total_takes = 0
         successful_takes = 0
@@ -428,6 +557,15 @@ def main() -> int:
                     compose_flags = compose_report.get("recommended_runtime_flags", {})
                     if not isinstance(compose_flags, dict):
                         compose_flags = {}
+                    model_enforcement = _enforce_t2v22_settings(
+                        process_file=process_file,
+                        model_policy=args.model_policy,
+                        detected_vram_gb=detected_vram_gb,
+                        quality=str(take_report["quality_hint"]),
+                    )
+                    take_report["model_enforcement"] = model_enforcement
+                    if model_enforcement.get("applied"):
+                        compose_flags = _enforced_runtime_flags()
                     run_command = _build_run_command(
                         args=args,
                         wan_root=wan_root,
@@ -501,6 +639,8 @@ def main() -> int:
             "plan_file": str(plan_file),
             "manifest_file": str(manifest_path),
             "wan_root": str(wan_root) if wan_root else None,
+            "detected_vram_gb": detected_vram_gb,
+            "model_policy": args.model_policy,
             "execute_generation": args.execute_generation,
             "dry_run": args.dry_run,
             "output_root": str(output_root),

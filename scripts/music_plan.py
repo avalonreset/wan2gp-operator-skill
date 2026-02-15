@@ -182,11 +182,8 @@ def _negative_prompt() -> str:
 
 
 def _quality_hint(shot_kind: str) -> str:
-    if shot_kind == "hero":
-        return "quality"
-    if shot_kind == "standard":
-        return "balanced"
-    return "draft"
+    # Music-video defaults bias toward visual quality over throughput.
+    return "quality"
 
 
 def _takes_for_kind(shot_kind: str, args: argparse.Namespace) -> int:
