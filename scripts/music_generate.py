@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -39,6 +40,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--compile-mode", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--timeout-minutes", type=int, default=0, help="Timeout per run attempt")
     parser.add_argument("--evolve-on-failure", action="store_true", help="Run evolve script for failed takes")
+    parser.add_argument("--preview-dir", help="Optional directory to write per-shot preview stills and gifs")
+    parser.add_argument("--ffmpeg-bin", default="ffmpeg", help="ffmpeg executable path for preview generation")
+    parser.add_argument("--preview-stills", type=int, default=3, help="Number of still preview frames per clip")
     parser.add_argument("--python-exe", default=sys.executable, help="Python executable for script chaining")
     parser.add_argument("--verbose", action="store_true", help="Include verbose command output snippets")
     return parser.parse_args()
@@ -111,6 +115,97 @@ def _quality_score_from_file(video_file: Path | None) -> float | None:
     if size_mb <= 6.0:
         return 0.6
     return 0.8
+
+
+def _run_no_throw(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def _build_preview_still_select(frame_count: int, stills: int) -> str:
+    still_count = max(1, stills)
+    if frame_count <= 1:
+        return "eq(n,0)"
+    indexes = []
+    for idx in range(still_count):
+        position = int(round(idx * (frame_count - 1) / max(1, still_count - 1)))
+        indexes.append(max(0, min(frame_count - 1, position)))
+    indexes = list(dict.fromkeys(indexes))
+    return "+".join(f"eq(n\\,{value})" for value in indexes)
+
+
+def _probe_frame_count(video_file: Path, ffprobe_bin: str) -> int:
+    command = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-count_frames",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_read_frames",
+        "-of",
+        "default=nokey=1:noprint_wrappers=1",
+        str(video_file),
+    ]
+    result = _run_no_throw(command)
+    if result.returncode != 0:
+        return 0
+    try:
+        return int((result.stdout or "0").strip() or "0")
+    except Exception:
+        return 0
+
+
+def _generate_previews(
+    video_file: Path,
+    preview_dir: Path,
+    take_id: str,
+    ffmpeg_bin: str,
+    preview_stills: int,
+) -> dict[str, Any]:
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    if shutil.which(ffmpeg_bin) is None:
+        return {"status": "skipped", "reason": f"ffmpeg not found: {ffmpeg_bin}"}
+
+    frame_count = _probe_frame_count(video_file, "ffprobe")
+    select_expr = _build_preview_still_select(frame_count, preview_stills)
+    still_pattern = preview_dir / f"{take_id}_preview_%02d.png"
+    gif_path = preview_dir / f"{take_id}_preview.gif"
+
+    still_cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        str(video_file),
+        "-vf",
+        f"select='{select_expr}'",
+        "-vsync",
+        "0",
+        str(still_pattern),
+    ]
+    still_proc = _run_no_throw(still_cmd)
+
+    gif_cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        str(video_file),
+        "-vf",
+        "fps=8,scale=416:-1:flags=lanczos",
+        "-loop",
+        "0",
+        str(gif_path),
+    ]
+    gif_proc = _run_no_throw(gif_cmd)
+
+    stills = sorted(preview_dir.glob(f"{take_id}_preview_*.png"))
+    return {
+        "status": "success" if still_proc.returncode == 0 and gif_proc.returncode == 0 else "partial",
+        "still_paths": [str(path.resolve()) for path in stills],
+        "gif_path": str(gif_path.resolve()) if gif_path.exists() else None,
+        "still_exit_code": still_proc.returncode,
+        "gif_exit_code": gif_proc.returncode,
+    }
 
 
 def _compose_command(
@@ -251,6 +346,11 @@ def main() -> int:
         process_dir = output_root / "process"
         run_dir = output_root / "runs"
         evolve_dir = output_root / "evolve"
+        preview_dir = (
+            Path(args.preview_dir).expanduser().resolve()
+            if args.preview_dir
+            else (output_root / "previews").resolve()
+        )
         process_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
         evolve_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +456,14 @@ def main() -> int:
                         video_file = _find_latest_mp4(shot_take_dir)
                         take_report["video_file"] = str(video_file) if video_file else None
                         take_report["quality_score"] = _quality_score_from_file(video_file)
+                        if video_file is not None:
+                            take_report["preview"] = _generate_previews(
+                                video_file=video_file,
+                                preview_dir=preview_dir,
+                                take_id=str(take_report["take_id"]),
+                                ffmpeg_bin=args.ffmpeg_bin,
+                                preview_stills=args.preview_stills,
+                            )
                         successful_takes += 1
                     elif run_status == "success" and args.dry_run:
                         successful_takes += 1

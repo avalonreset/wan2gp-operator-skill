@@ -180,6 +180,18 @@ def _next_retry_command(command: list[str], log_text: str) -> tuple[list[str] | 
                 "Removed unsupported --teacache flag and retried automatically.",
                 "--teacache",
             )
+    triton_missing = (
+        "Cannot find a working triton installation" in log_text
+        or "torch._inductor.exc.TritonMissing" in log_text
+    )
+    if "--compile" in command and triton_missing:
+        retried = strip_flag_with_value(command, "--compile")
+        if retried != command:
+            return (
+                retried,
+                "Removed unsupported --compile flag (Triton missing) and retried automatically.",
+                "--compile",
+            )
     return None, None, None
 
 
